@@ -70,6 +70,118 @@ output_ranges, retired_ranges = segmenter.process(
 )
 ```
 
+## Generating ranges for a specific `parent_id`
+
+A common use-case is taking a collection of `Event`s, filtering them to a
+single `parent_id`, and producing the `Range`s for that parent.  There are two
+ways to do this depending on whether you are using the direct Python API or an
+Apache Beam pipeline.
+
+### Direct Python API
+
+Group your events by `parent_id`, then call `segmenter.process()` for each
+group.  The segmenter processes **one parent at a time**, so you must supply
+only the events (and any prior ranges) that belong to the target parent.
+
+```python
+from collections import defaultdict
+from time_range_segmenter import Event, Range, TimeRangeSegmenter
+
+def my_label_fn(events: list[Event]) -> list[Range]:
+    """Convert a single parent's events into ranges — your business logic goes here."""
+    ...
+
+segmenter = TimeRangeSegmenter(label_fn=my_label_fn)
+
+# ---- 1. Gather events and (optionally) prior ranges ----
+all_events: list[Event] = [...]       # events from your data source
+prior_ranges: list[Range] = [...]     # ranges from the previous run (if any)
+
+# ---- 2. Group by parent_id ----
+events_by_parent: dict[int, list[Event]] = defaultdict(list)
+for event in all_events:
+    events_by_parent[event.parent_id].append(event)
+
+ranges_by_parent: dict[int, list[Range]] = defaultdict(list)
+for r in prior_ranges:
+    ranges_by_parent[r.parent_id].append(r)
+
+# ---- 3. Process a single parent_id ----
+target_parent_id = 42
+
+output_ranges, retired_ranges = segmenter.process(
+    parent_id=target_parent_id,
+    events=events_by_parent[target_parent_id],
+    input_ranges=ranges_by_parent.get(target_parent_id, []),
+)
+# output_ranges  — new Range objects for parent 42 with sticky range_ids
+# retired_ranges — prior Range objects whose range_ids were not preserved
+
+# ---- 4. Or process every parent_id at once ----
+all_parent_ids = set(events_by_parent) | set(ranges_by_parent)
+for pid in all_parent_ids:
+    output, retired = segmenter.process(
+        parent_id=pid,
+        events=events_by_parent[pid],
+        input_ranges=ranges_by_parent.get(pid, []),
+    )
+    # ... handle output and retired ranges for each parent ...
+```
+
+> **Key points**
+>
+> * `segmenter.process()` accepts the events and ranges for **exactly one**
+>   `parent_id` per call.  The caller is responsible for grouping data
+>   beforehand.
+> * `input_ranges` can be omitted (or set to `None` / `[]`) on the first run
+>   when there are no prior ranges.
+> * The `parent_id` field on every returned `Range` is always set to the
+>   `parent_id` you pass in, regardless of what the `label_fn` returns.
+
+### Apache Beam pipeline
+
+When using Apache Beam, the `build_pipeline` helper handles the grouping
+automatically.  It keys both `Event`s and `Range`s by their `parent_id`,
+performs a `CoGroupByKey`, and then applies the segmenter to each group.  You
+do **not** need to group or filter manually.
+
+```python
+import apache_beam as beam
+from time_range_segmenter import Event, Range, TimeRangeSegmenter
+from time_range_segmenter.pipeline import build_pipeline
+
+segmenter = TimeRangeSegmenter(label_fn=my_label_fn)
+
+with beam.Pipeline() as p:
+    # parse_event and parse_range are user-supplied functions that convert
+    # JSON strings into Event and Range objects respectively.
+    events = p | "ReadEvents" >> beam.io.ReadFromText("events.jsonl") | beam.Map(parse_event)
+    ranges = p | "ReadRanges" >> beam.io.ReadFromText("ranges.jsonl") | beam.Map(parse_range)
+
+    # build_pipeline groups events and ranges by parent_id internally,
+    # so the output PCollections contain Range objects for ALL parent_ids.
+    output_ranges, retired_ranges = build_pipeline(
+        pipeline=p,
+        events_pcollection=events,
+        ranges_pcollection=ranges,
+        segmenter=segmenter,
+    )
+
+    # To inspect or write ranges for a specific parent_id, filter the output:
+    parent_42_ranges = output_ranges | beam.Filter(lambda r: r.parent_id == 42)
+```
+
+> **Key points**
+>
+> * `build_pipeline` performs a `CoGroupByKey` on `parent_id`, so each
+>   invocation of the segmenter automatically receives only the events and
+>   ranges that share the same `parent_id`.
+> * The returned `PCollection`s contain `Range` objects for **all**
+>   `parent_id`s.  Use `beam.Filter` if you need only a subset.
+> * All callables (`label_fn`, `split_fn`, etc.) must be **picklable**
+>   (module-level functions, not lambdas or closures) when used in a Beam
+>   pipeline.
+
 ### Custom hooks
 
 ```python
