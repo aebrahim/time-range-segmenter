@@ -1,4 +1,0 @@
-apache-beam>=2.50
-
-[dev]
-pytest>=7
