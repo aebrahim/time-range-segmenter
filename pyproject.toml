@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "time-range-segmenter"
+version = "0.1.0"
+description = "Persistent-identifier scaffold for time-range segmentation pipelines"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "apache-beam>=2.50",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
